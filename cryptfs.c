@@ -603,6 +603,24 @@ static void upgrade_crypt_ftr(int fd, struct crypt_mnt_ftr *crypt_ftr, off64_t o
         SLOGW("upgrading crypto footer to 1.3");
         crypt_ftr->crypt_type = CRYPT_TYPE_PASSWORD;
         crypt_ftr->minor_version = 3;
+        /* Here if we get CRYPT_DATA_CORRUPT flag set (i.e. 0x8) then it means
+         * CRYPT_FDE_COMPLETED flag was set in actual for crypto footer version 1.2.
+         * Now while upgrading footer to 1.3, we need to reset CRYPT_DATA_CORRUPT flag
+         * and set CRYPT_FDE_COMPLETED flag back.
+         */
+        if (crypt_ftr->flags & CRYPT_DATA_CORRUPT) {
+            crypt_ftr->flags &= ~CRYPT_DATA_CORRUPT;
+            crypt_ftr->flags |= CRYPT_FDE_COMPLETED;
+        }
+        /* Here if we get CRYPT_INCONSISTENT_STATE flag set (i.e. 0x4) then it means
+         * CRYPT_PFE_ACTIVATED flag was set in actual for crypto footer version 1.2.
+         * Now while upgrading footer to 1.3, we need to reset CRYPT_INCONSISTENT_STATE
+         * flag and set CRYPT_PFE_ACTIVATED flag back.
+         */
+        if (crypt_ftr->flags & CRYPT_INCONSISTENT_STATE) {
+            crypt_ftr->flags &= ~CRYPT_INCONSISTENT_STATE;
+            crypt_ftr->flags |= CRYPT_PFE_ACTIVATED;
+        }
     }
 
     if ((orig_major != crypt_ftr->major_version) || (orig_minor != crypt_ftr->minor_version)) {
