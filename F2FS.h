@@ -14,18 +14,17 @@
  * limitations under the License.
  */
 
-#ifndef _EXT4_H
-#define _EXT4_H
+#ifndef _F2FS_H
+#define _F2FS_H
 
 #include <unistd.h>
 
-class Ext4 {
+class F2FS {
 public:
     static int doMount(const char *fsPath, const char *mountPoint, bool ro, bool remount,
-            bool executable, bool sdcard, const char *mountOpts = NULL);
+            bool executable, bool sdcard);
     static int check(const char *fsPath);
-    static int format(const char *fsPath, unsigned int numSectors, const char *mountpoint);
-    static int resize(const char *fsPath, unsigned int numSectors);
+    static int format(const char *fsPath);
 };
 
 #endif

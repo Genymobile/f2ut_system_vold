@@ -27,6 +27,7 @@ class Volume {
 private:
     int mState;
     int mFlags;
+    char* mOpts;
 
 public:
     static const int State_Init       = -1;
@@ -57,6 +58,7 @@ protected:
     int mPartIdx;
     int mOrigPartIdx;
     bool mRetryMount;
+    int mLunNumber;
 
     /*
      * The major/minor tuple of the currently mounted filesystem.
@@ -68,7 +70,7 @@ public:
     virtual ~Volume();
 
     int mountVol();
-    int unmountVol(bool force, bool revert);
+    int unmountVol(bool force, bool revert, bool detach=false);
     int formatVol(bool wipe);
 
     const char* getLabel() { return mLabel; }
@@ -76,6 +78,9 @@ public:
     const char* getUserLabel() { return mUserLabel; }
     int getState() { return mState; }
     int getFlags() { return mFlags; };
+
+    int getLunNumber() { return mLunNumber; }
+    void setLunNumber(int lunNumber) { mLunNumber = lunNumber; }
 
     /* Mountpoint of the raw volume */
     virtual const char *getMountpoint() = 0;
@@ -93,13 +98,13 @@ public:
 
     void setDebug(bool enable);
     virtual int getVolInfo(struct volume_info *v) = 0;
+    virtual int getDeviceNodes(dev_t *devs, int max) = 0;
 
 protected:
     void setUuid(const char* uuid);
     void setUserLabel(const char* userLabel);
     void setState(int state);
 
-    virtual int getDeviceNodes(dev_t *devs, int max) = 0;
     virtual int updateDeviceInfo(char *new_path, int new_major, int new_minor) = 0;
     virtual void revertDeviceInfo(void) = 0;
     virtual int isDecrypted(void) = 0;
@@ -110,7 +115,7 @@ private:
     int initializeMbr(const char *deviceNode);
     bool isMountpointMounted(const char *path);
     int mountAsecExternal();
-    int doUnmount(const char *path, bool force);
+    int doUnmount(const char *path, bool force, bool detach);
     int extractMetadata(const char* devicePath);
 };
 

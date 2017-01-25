@@ -97,6 +97,12 @@ static char *saved_mount_point;
 static int  master_key_saved = 0;
 static struct crypt_persist_data *persist_data = NULL;
 
+#ifdef MINIVOLD
+inline int release_wake_lock(const char* id) { return 0; };
+inline int acquire_wake_lock(int lock, const char* id) { return 0; };
+#endif
+
+#ifndef MINIVOLD // no HALs in recovery...
 static int keymaster_init(keymaster_device_t **keymaster_dev)
 {
     int rc;
@@ -121,10 +127,14 @@ out:
     *keymaster_dev = NULL;
     return rc;
 }
+#endif
 
 /* Should we use keymaster? */
 static int keymaster_check_compatibility()
 {
+#ifdef MINIVOLD
+    return -1;
+#else
     keymaster_device_t *keymaster_dev = 0;
     int rc = 0;
 
@@ -150,11 +160,15 @@ static int keymaster_check_compatibility()
 out:
     keymaster_close(keymaster_dev);
     return rc;
+#endif
 }
 
 /* Create a new keymaster key and store it in this footer */
 static int keymaster_create_key(struct crypt_mnt_ftr *ftr)
 {
+#ifdef MINIVOLD // no HALs in recovery...
+    return -1;
+#else
     uint8_t* key = 0;
     keymaster_device_t *keymaster_dev = 0;
 
@@ -191,6 +205,7 @@ out:
     keymaster_close(keymaster_dev);
     free(key);
     return rc;
+#endif
 }
 
 /* This signs the given object using the keymaster key. */
@@ -200,6 +215,9 @@ static int keymaster_sign_object(struct crypt_mnt_ftr *ftr,
                                  unsigned char **signature,
                                  size_t *signature_size)
 {
+#ifdef MINIVOLD // no HALs in recovery...
+    return -1;
+#else
     int rc = 0;
     keymaster_device_t *keymaster_dev = 0;
     if (keymaster_init(&keymaster_dev)) {
@@ -277,6 +295,7 @@ static int keymaster_sign_object(struct crypt_mnt_ftr *ftr,
 
     keymaster_close(keymaster_dev);
     return rc;
+#endif
 }
 
 /* Store password when userdata is successfully decrypted and mounted.
@@ -573,6 +592,7 @@ static void upgrade_crypt_ftr(int fd, struct crypt_mnt_ftr *crypt_ftr, off64_t o
         /* Need to initialize the persistent data area */
         if (lseek64(fd, pdata_offset, SEEK_SET) == -1) {
             SLOGE("Cannot seek to persisent data offset\n");
+            free(pdata);
             return;
         }
         /* Write all zeros to the first copy, making it invalid */
@@ -587,6 +607,7 @@ static void upgrade_crypt_ftr(int fd, struct crypt_mnt_ftr *crypt_ftr, off64_t o
         crypt_ftr->persist_data_offset[0] = pdata_offset;
         crypt_ftr->persist_data_offset[1] = pdata_offset + CRYPT_PERSIST_DATA_SIZE;
         crypt_ftr->minor_version = 1;
+        free(pdata);
     }
 
     if ((crypt_ftr->major_version == 1) && (crypt_ftr->minor_version == 1)) {
@@ -603,24 +624,6 @@ static void upgrade_crypt_ftr(int fd, struct crypt_mnt_ftr *crypt_ftr, off64_t o
         SLOGW("upgrading crypto footer to 1.3");
         crypt_ftr->crypt_type = CRYPT_TYPE_PASSWORD;
         crypt_ftr->minor_version = 3;
-        /* Here if we get CRYPT_DATA_CORRUPT flag set (i.e. 0x8) then it means
-         * CRYPT_FDE_COMPLETED flag was set in actual for crypto footer version 1.2.
-         * Now while upgrading footer to 1.3, we need to reset CRYPT_DATA_CORRUPT flag
-         * and set CRYPT_FDE_COMPLETED flag back.
-         */
-        if (crypt_ftr->flags & CRYPT_DATA_CORRUPT) {
-            crypt_ftr->flags &= ~CRYPT_DATA_CORRUPT;
-            crypt_ftr->flags |= CRYPT_FDE_COMPLETED;
-        }
-        /* Here if we get CRYPT_INCONSISTENT_STATE flag set (i.e. 0x4) then it means
-         * CRYPT_PFE_ACTIVATED flag was set in actual for crypto footer version 1.2.
-         * Now while upgrading footer to 1.3, we need to reset CRYPT_INCONSISTENT_STATE
-         * flag and set CRYPT_PFE_ACTIVATED flag back.
-         */
-        if (crypt_ftr->flags & CRYPT_INCONSISTENT_STATE) {
-            crypt_ftr->flags &= ~CRYPT_INCONSISTENT_STATE;
-            crypt_ftr->flags |= CRYPT_PFE_ACTIVATED;
-        }
     }
 
     if ((orig_major != crypt_ftr->major_version) || (orig_minor != crypt_ftr->minor_version)) {
@@ -892,13 +895,13 @@ static int save_persistent_data(void)
     }
 
     /* Write the new copy first, if successful, then erase the old copy */
-    if (lseek(fd, write_offset, SEEK_SET) < 0) {
+    if (lseek64(fd, write_offset, SEEK_SET) < 0) {
         SLOGE("Cannot seek to write persistent data");
         goto err2;
     }
     if (unix_write(fd, persist_data, crypt_ftr.persist_data_size) ==
         (int) crypt_ftr.persist_data_size) {
-        if (lseek(fd, erase_offset, SEEK_SET) < 0) {
+        if (lseek64(fd, erase_offset, SEEK_SET) < 0) {
             SLOGE("Cannot seek to erase previous persistent data");
             goto err2;
         }
@@ -1138,17 +1141,29 @@ static int create_crypto_blk_dev(struct crypt_mnt_ftr *crypt_ftr, unsigned char 
   snprintf(crypto_blk_name, MAXPATHLEN, "/dev/block/dm-%u", minor);
 
 #ifdef CONFIG_HW_DISK_ENCRYPTION
-  /* Set fde_enabled if either FDE completed or in-progress */
-  property_get("ro.crypto.state", encrypted_state, ""); /* FDE completed */
-  property_get("vold.encrypt_progress", progress, ""); /* FDE in progress */
-  if (!strcmp(encrypted_state, "encrypted") || strcmp(progress, "")) {
-      if (is_ice_enabled())
-          extra_params = "fde_enabled ice";
+  if (is_hw_disk_encryption((char*)crypt_ftr->crypto_type_name)) {
+      /* Set fde_enabled if either FDE completed or in-progress */
+      property_get("ro.crypto.state", encrypted_state, ""); /* FDE completed */
+      property_get("vold.encrypt_progress", progress, ""); /* FDE in progress */
+      if (!strcmp(encrypted_state, "encrypted") || strcmp(progress, "")) {
+          if (is_ice_enabled())
+              extra_params = "fde_enabled ice";
+          else
+          extra_params = "fde_enabled";
+      }
       else
-      extra_params = "fde_enabled";
+          extra_params = "fde_disabled";
+  } else {
+      extra_params = "";
+      if (! get_dm_crypt_version(fd, name, version)) {
+          /* Support for allow_discards was added in version 1.11.0 */
+          if ((version[0] >= 2) ||
+              ((version[0] == 1) && (version[1] >= 11))) {
+              extra_params = "1 allow_discards";
+              SLOGI("Enabling support for allow_discards in dmcrypt.\n");
+          }
+      }
   }
-  else
-      extra_params = "fde_disabled";
 #else
   extra_params = "";
   if (! get_dm_crypt_version(fd, name, version)) {
@@ -1822,12 +1837,14 @@ static int test_mount_encrypted_fs(struct crypt_mnt_ftr* crypt_ftr,
     }
     else {
       if (is_ice_enabled()) {
+#if 0
         if (create_crypto_blk_dev(crypt_ftr, &key_index,
                             real_blkdev, crypto_blkdev, label)) {
           SLOGE("Error creating decrypted block device\n");
           rc = -1;
           goto errout;
         }
+#endif
       } else {
         if (create_crypto_blk_dev(crypt_ftr, decrypted_master_key,
                             real_blkdev, crypto_blkdev, label)) {
@@ -3198,7 +3215,10 @@ int cryptfs_enable_internal(char *howarg, int crypt_type, char *passwd,
         }
 
         /* Write the key to the end of the partition */
-        put_crypt_ftr_and_key(&crypt_ftr);
+        if (put_crypt_ftr_and_key(&crypt_ftr)) {
+            SLOGE("Error writing the key to the end of the partition\n");
+            goto error_shutting_down;
+        }
 
         /* If any persistent data has been remembered, save it.
          * If none, create a valid empty table and save that.
@@ -3253,10 +3273,12 @@ int cryptfs_enable_internal(char *howarg, int crypt_type, char *passwd,
 
     decrypt_master_key(passwd, decrypted_master_key, &crypt_ftr, 0, 0);
 #ifdef CONFIG_HW_DISK_ENCRYPTION
-    if (is_hw_disk_encryption((char*)crypt_ftr.crypto_type_name) && is_ice_enabled())
+    if (is_hw_disk_encryption((char*)crypt_ftr.crypto_type_name) && is_ice_enabled()) {
+#if 0
       create_crypto_blk_dev(&crypt_ftr, &key_index, real_blkdev, crypto_blkdev,
                           "userdata");
-    else
+#endif
+     } else
       create_crypto_blk_dev(&crypt_ftr, decrypted_master_key, real_blkdev, crypto_blkdev,
                           "userdata");
 
@@ -3684,15 +3706,21 @@ int cryptfs_changepw(int crypt_type, const char *newpw)
         newpw = adjusted_passwd;
     }
 
-    encrypt_master_key(crypt_type == CRYPT_TYPE_DEFAULT ? DEFAULT_PASSWORD
-                                                        : newpw,
+    if (encrypt_master_key(crypt_type == CRYPT_TYPE_DEFAULT ? DEFAULT_PASSWORD
+                                                            : newpw,
                        crypt_ftr.salt,
                        saved_master_key,
                        crypt_ftr.master_key,
-                       &crypt_ftr);
+                       &crypt_ftr)) {
+        SLOGE("Error encrypting master key");
+        return -1;
+    }
 
     /* save the key */
-    put_crypt_ftr_and_key(&crypt_ftr);
+    if (put_crypt_ftr_and_key(&crypt_ftr)) {
+        SLOGE("Failed to save key");
+        return -1;
+    }
 
     free(adjusted_passwd);
 

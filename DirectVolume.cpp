@@ -89,10 +89,16 @@ DirectVolume::DirectVolume(VolumeManager *vm, const fstab_rec* rec, int flags) :
 
     char mount[PATH_MAX];
 
+#ifdef MINIVOLD
+    // In recovery, directly mount to /storage/* since we have no fuse daemon
+    snprintf(mount, PATH_MAX, "%s/%s", Volume::FUSE_DIR, rec->label);
+    mMountpoint = mFuseMountpoint = strdup(mount);
+#else
     snprintf(mount, PATH_MAX, "%s/%s", Volume::MEDIA_DIR, rec->label);
     mMountpoint = strdup(mount);
     snprintf(mount, PATH_MAX, "%s/%s", Volume::FUSE_DIR, rec->label);
     mFuseMountpoint = strdup(mount);
+#endif
 
     setState(Volume::State_NoMedia);
 }
@@ -230,8 +236,6 @@ void DirectVolume::handleDiskAdded(const char * /*devpath*/,
     }
 
     mPendingPartCount = mDiskNumParts;
-    for (int i = 0; i < MAX_PARTITIONS; i++)
-        mPartMinors[i] = -1;
 
     if (mDiskNumParts == 0) {
 #ifdef PARTITION_DEBUG
@@ -261,6 +265,8 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
         part_num = 1;
     }
 
+    SLOGD("DirectVolume::handlePartitionAdded -> MAJOR %d, MINOR %d, PARTN %d\n", major, minor, part_num);
+
     if (part_num > MAX_PARTITIONS || part_num < 1) {
         SLOGE("Invalid 'PARTN' value");
         return;
@@ -272,13 +278,20 @@ void DirectVolume::handlePartitionAdded(const char *devpath, NetlinkEvent *evt) 
 
     if (major != mDiskMajor) {
         SLOGE("Partition '%s' has a different major than its disk!", devpath);
+#ifdef VOLD_DISC_HAS_MULTIPLE_MAJORS
+        ValuePair vp;
+        vp.major = major;
+        vp.part_num = part_num;
+        badPartitions.push_back(vp);
+#else
         return;
+#endif
     }
 #ifdef PARTITION_DEBUG
     SLOGD("Dv:partAdd: part_num = %d, minor = %d\n", part_num, minor);
 #endif
-    if (part_num >= MAX_PARTITIONS) {
-        SLOGE("Dv:partAdd: ignoring part_num = %d (max: %d)\n", part_num, MAX_PARTITIONS-1);
+    if (part_num > MAX_PARTITIONS) {
+        SLOGE("Dv:partAdd: ignoring part_num = %d (max: %d)\n", part_num, MAX_PARTITIONS);
     } else {
         if ((mPartMinors[part_num - 1] == -1) && mPendingPartCount)
             mPendingPartCount--;
@@ -322,8 +335,6 @@ void DirectVolume::handleDiskChanged(const char * /*devpath*/,
     }
 
     mPendingPartCount = mDiskNumParts;
-    for (int i = 0; i < MAX_PARTITIONS; i++)
-        mPartMinors[i] = -1;
 
     if (getState() != Volume::State_Formatting) {
         if (mDiskNumParts == 0) {
@@ -365,7 +376,7 @@ void DirectVolume::handleDiskRemoved(const char * /*devpath*/,
             SLOGE("Failed to cleanup ASEC - unmount will probably fail!");
         }
 
-        if (Volume::unmountVol(true, false)) {
+        if (Volume::unmountVol(true, false, false)) {
             SLOGE("Failed to unmount volume on bad removal (%s)",
                  strerror(errno));
             // XXX: At this point we're screwed for now
@@ -373,6 +384,9 @@ void DirectVolume::handleDiskRemoved(const char * /*devpath*/,
             SLOGD("Crisis averted");
         }
     }
+
+    for (int i = 0; i < MAX_PARTITIONS; i++)
+        mPartMinors[i] = -1;
 
     setState(Volume::State_NoMedia);
 }
@@ -402,17 +416,19 @@ void DirectVolume::handlePartitionRemoved(const char * /*devpath*/,
          * Yikes, our mounted partition is going away!
          */
 
-        bool providesAsec = (getFlags() & VOL_PROVIDES_ASEC) != 0;
-        if (providesAsec && mVm->cleanupAsec(this, true)) {
-            SLOGE("Failed to cleanup ASEC - unmount will probably fail!");
-        }
-
         snprintf(msg, sizeof(msg), "Volume %s %s bad removal (%d:%d)",
                  getLabel(), getFuseMountpoint(), major, minor);
         mVm->getBroadcaster()->sendBroadcast(ResponseCode::VolumeBadRemoval,
                                              msg, false);
 
-        if (Volume::unmountVol(true, false)) {
+        bool providesAsec = (getFlags() & VOL_PROVIDES_ASEC) != 0;
+        if (providesAsec && mVm->cleanupAsec(this, true)) {
+            SLOGE("Failed to cleanup ASEC - unmount will probably fail!");
+        }
+
+
+
+        if (Volume::unmountVol(true, false, false)) {
             SLOGE("Failed to unmount volume on bad removal (%s)", 
                  strerror(errno));
             // XXX: At this point we're screwed for now
@@ -444,6 +460,7 @@ int DirectVolume::getDeviceNodes(dev_t *devs, int max) {
         // If the disk has no partitions, try the disk itself
         if (!mDiskNumParts) {
             devs[0] = MKDEV(mDiskMajor, mDiskMinor);
+			SLOGD("Disc has only one partition.");
             return 1;
         }
 
@@ -451,13 +468,52 @@ int DirectVolume::getDeviceNodes(dev_t *devs, int max) {
         for (i = 0; i < mDiskNumParts; i++) {
             if (i == max)
                 break;
+#ifdef VOLD_DISC_HAS_MULTIPLE_MAJORS
+            int major = getMajorNumberForBadPartition(i + 1);
+            if(major != -1) {
+                SLOGE("Fixing major number from %d to %d for partition %d", mDiskMajor, major, i + 1);
+                devs[i] = MKDEV(major, mPartMinors[i]);
+            }
+            else
+#endif
             devs[i] = MKDEV(mDiskMajor, mPartMinors[i]);
         }
         return mDiskNumParts;
     }
+#ifdef VOLD_DISC_HAS_MULTIPLE_MAJORS
+    int major = getMajorNumberForBadPartition(mPartIdx);
+    if(major != -1) {
+        SLOGE("Fixing major number from %d to %d for partition %d", mDiskMajor, major, mPartIdx);
+        devs[0] = MKDEV(major, mPartMinors[mPartIdx - 1]);
+    }
+    else
+#endif
     devs[0] = MKDEV(mDiskMajor, mPartMinors[mPartIdx -1]);
     return 1;
 }
+
+#ifdef VOLD_DISC_HAS_MULTIPLE_MAJORS
+/*
+ * Returns the correct major number for a bad partition.
+ * Returns -1 if the partition is good.
+ */
+int DirectVolume::getMajorNumberForBadPartition(int part_num) {
+    SLOGD("Checking for bad partition major number");
+    bool found = false;
+    android::List<ValuePair>::iterator iterator = badPartitions.begin();
+    for(;iterator != badPartitions.end(); iterator++) {
+        if((*iterator).part_num == part_num) {
+            found = true;
+            SLOGD("Found bad partition");
+            break;
+        }
+    }
+    if(found == true)
+        return (*iterator).major;
+    else
+        return -1;
+}
+#endif
 
 /*
  * Called from base to update device info,
